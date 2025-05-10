@@ -8,10 +8,6 @@ import random
 import os
 from typing import List, Dict, Any
 
-# 确保中文显示正常
-import matplotlib.pyplot as plt
-plt.rcParams["font.family"] = ["SimHei", "WenQuanYi Micro Hei", "Heiti TC"]
-
 # 模型路径配置
 CHECKPOINT_PATH = "checkpoint_v6.pth"
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -102,14 +98,21 @@ class MGANetwork(torch.nn.Module):
         return weighted_features
 
 # 压力测试任务集
+# 优化建议1：使用类变量共享模型实例
 class MGATaskSet(TaskSet):
-    wait_time = between(0.5, 2.0)  # 模拟用户思考时间
+    _model = None  # 类变量共享模型
     
+    @classmethod
+    def get_model(cls):
+        if cls._model is None:
+            cls._model = MGANetwork().to(DEVICE)
+            cls._model.eval()
+        return cls._model
+
     def on_start(self):
-        """初始化测试环境"""
-        self.model = MGANetwork().to(DEVICE)
-        self.model.eval()  # 设置为评估模式
+        self.model = self.get_model() 
         self.vocab_size = 1000
+        self.max_memory = 0  
         
         # 增加更多多样化的测试文本提示
         self.text_prompts = [
@@ -192,27 +195,33 @@ class MGATaskSet(TaskSet):
     
     @task(1)
     def test_full_model(self):
-        """测试完整模型性能"""
-        # 确保batch_size不超过text_prompts的长度
-        batch_size = random.randint(1, len(self.text_prompts))
-        seq_length = random.randint(10, 30)
-        input_ids = torch.randint(0, self.vocab_size, (batch_size, seq_length)).to(DEVICE)
-        prompts = random.sample(self.text_prompts, batch_size)
-        
         try:
-            with torch.no_grad():
+            batch_size = random.randint(8, 32)
+            seq_length = random.randint(10, 50)
+            input_ids = torch.randint(0, self.vocab_size, (batch_size, seq_length)).to(DEVICE)
+            prompts = random.sample(self.text_prompts, min(batch_size, len(self.text_prompts)))  # Add min() check
+            
+            with torch.cuda.amp.autocast():
                 output = self.model(input_ids, prompts)
             
-            # 记录测试结果
+            current_mem = torch.cuda.memory_allocated()
+            self.max_memory = max(self.max_memory, current_mem)
+            
             self.user.environment.events.request.fire(
                 request_type="FULL",
                 name="MGANetwork",
                 response_time=0,
                 response_length=output.numel(),
-                exception=None
+                exception=None,
+                memory_usage=current_mem,
+                peak_memory=self.max_memory
             )
+        except torch.cuda.OutOfMemoryError:
+            torch.cuda.empty_cache()
+            print("显存不足，已清理缓存")
         except Exception as e:
-            # 记录失败信息
+            print(f"CUDA错误: {str(e)}")
+            print(torch.cuda.memory_summary())
             self.user.environment.events.request.fire(
                 request_type="FULL",
                 name="MGANetwork",
@@ -224,14 +233,20 @@ class MGATaskSet(TaskSet):
 # 用户类定义
 class MGAUser(HttpUser):
     tasks = [MGATaskSet]
-    min_wait = 500  # 最小等待时间(毫秒)
-    max_wait = 2000  # 最大等待时间(毫秒)
+    min_wait = 500
+    max_wait = 2000
     
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        # 限制CUDA线程数
+        torch.set_num_threads(4)  # 根据CPU核心数调整
         # 确保CLIP模型已加载
         try:
             clip.load("ViT-B/32", device=DEVICE)
         except Exception as e:
             print(f"加载CLIP模型时出错: {e}")
             print("请确保已安装CLIP: pip install git+https://github.com/openai/CLIP.git")
+
+if __name__ == "__main__":
+    print(DEVICE)
+    print(torch.cuda.is_available())

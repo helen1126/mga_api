@@ -51,18 +51,27 @@ async def load_model():
     print("模型加载完成，API服务已就绪")
 
 @app.post("/mga-weight", response_model=WeightResponse)
+# 优化建议1：添加类型注解
+class WeightRequest(BaseModel):
+    texts: List[str]
+    batch_size: Optional[int] = Field(default=4, ge=1, le=8)  # 添加验证范围
+
+# 优化建议2：使用更高效的批处理方式
 async def get_mga_weights(request: WeightRequest):
     try:
-        # 确保有输入文本
         if not request.texts:
             raise HTTPException(status_code=400, detail="请提供至少一个文本描述")
         
-        # 限制最大批处理大小
-        batch_size = min(request.batch_size, 8)  # 防止过大的批处理导致内存溢出
-        
-        # 开始计时
-        import time
+        batch_size = min(request.batch_size, 8)
         start_time = time.time()
+        
+        # 使用列表推导式优化
+        all_features = [
+            clip_model.encode_text(
+                clip.tokenize(request.texts[i:i+batch_size]).to(DEVICE)
+            ).float()
+            for i in range(0, len(request.texts), batch_size)
+        ]
         
         # 处理文本提示，获取CLIP特征
         with torch.no_grad():

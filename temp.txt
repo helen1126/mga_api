@@ -1,1 +1,3 @@
 locust -f stress_test.py --host=http://localhost  
+nsys profile -o concurrent_gpu_report --force-overwrite true --trace=cuda,nvtx locust -f stress_test.py --host=http://localhost:8000 
+nsys-ui concurrent_gpu_report.qdrep
